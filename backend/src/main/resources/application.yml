@@ -1,0 +1,68 @@
+server:
+  port: 8080
+  error:
+    include-message: never
+    include-stacktrace: never
+
+spring:
+  application:
+    name: karaoke-backend
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/karaoke}
+    username: ${DB_USER:karaoke}
+    password: ${DB_PASSWORD:karaoke}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    locations: classpath:db/migration
+    # Le seed de démo (migration répétable du profil dev) peut être absent hors profil dev.
+    ignore-migration-patterns:
+      - "*:future"
+      - "repeatable:missing"
+  jackson:
+    default-property-inclusion: always
+    serialization:
+      write-dates-as-timestamps: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+# Swagger UI affiche le contrat docs/openapi.yaml (servi sur /openapi.yaml), pas le contrat généré
+# depuis le code (/v3/api-docs, laissé derrière l'authentification).
+springdoc:
+  swagger-ui:
+    url: /openapi.yaml
+    path: /swagger-ui.html
+
+karaoke:
+  security:
+    jwt:
+      # Secret HMAC (HS256), au moins 32 octets. Obligatoire : aucune valeur par défaut hors profil dev.
+      secret: ${JWT_SECRET:}
+      issuer: karaoke-backend
+      access-token-ttl: 15m
+    refresh-token-ttl: 30d
+  storage:
+    # URL du stockage telle que vue par l'application mobile : les URLs signées pointent dessus.
+    public-endpoint: ${STORAGE_PUBLIC_ENDPOINT:http://localhost:9000}
+    region: ${STORAGE_REGION:us-east-1}
+    access-key: ${STORAGE_ACCESS_KEY:minioadmin}
+    secret-key: ${STORAGE_SECRET_KEY:minioadmin}
+    # MinIO exige l'adressage par chemin (http://hote/bucket/cle).
+    path-style-access: ${STORAGE_PATH_STYLE:true}
+    instrumentals-bucket: instrumentals
+    recordings-bucket: recordings
+    signed-url-ttl: 5m
+  free-tier:
+    daily-song-limit: 3
+    # Fuseau qui définit le « jour » pour la limite gratuite.
+    zone: Europe/Paris

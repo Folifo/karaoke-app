@@ -1,0 +1,4 @@
+karaoke:
+  security:
+    jwt:
+      secret: test-secret-test-secret-test-secret-0123
