@@ -1,0 +1,5 @@
+.git
+.github
+**/target
+mobile
+.env

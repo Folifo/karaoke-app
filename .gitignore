@@ -1,0 +1,17 @@
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Environnement local
+.env
+
+# Backend
+backend/target/
+
+# Flutter (étape 4)
+mobile/**/.dart_tool/
+mobile/**/build/
+mobile/**/.flutter-plugins
+mobile/**/.flutter-plugins-dependencies

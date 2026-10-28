@@ -1,0 +1,544 @@
+openapi: 3.0.3
+info:
+  title: Karaoké API
+  version: 1.0.0
+  description: |
+    Contrat de l'API REST v1 de l'application karaoké.
+
+    **Authentification** : JWT. `POST /auth/login` (ou `/auth/register`) renvoie un access token
+    de courte durée (en-tête `Authorization: Bearer <token>`) et un refresh token opaque,
+    à usage unique, à échanger sur `POST /auth/refresh`.
+
+    **Erreurs** : toutes les erreurs suivent la RFC 9457 (`application/problem+json`) avec
+    un champ `code` stable que l'application mobile peut interpréter :
+
+    | code | HTTP | signification |
+    |---|---|---|
+    | `VALIDATION_ERROR` | 400 | corps ou paramètres invalides (détail par champ dans `errors`) |
+    | `MALFORMED_REQUEST` | 400 | JSON illisible ou paramètre de type incorrect |
+    | `UNAUTHORIZED` | 401 | access token absent, invalide ou expiré |
+    | `INVALID_CREDENTIALS` | 401 | email ou mot de passe incorrect |
+    | `INVALID_REFRESH_TOKEN` | 401 | refresh token inconnu, expiré ou déjà utilisé |
+    | `FORBIDDEN` | 403 | accès refusé à cette ressource |
+    | `SUBSCRIPTION_REQUIRED` | 403 | chanson réservée aux abonnés |
+    | `NOT_FOUND` | 404 | ressource ou route inexistante |
+    | `METHOD_NOT_ALLOWED` | 405 | méthode HTTP non supportée sur cette route |
+    | `EMAIL_ALREADY_USED` | 409 | email déjà associé à un compte |
+    | `UNSUPPORTED_MEDIA_TYPE` | 415 | corps envoyé dans un autre format que JSON |
+    | `FREE_LIMIT_REACHED` | 429 | limite quotidienne gratuite atteinte |
+    | `INTERNAL_ERROR` | 500 | erreur inattendue |
+
+    **Fichiers** : les fichiers audio ne transitent jamais par l'API ; elle fournit des URLs
+    signées valables quelques minutes vers le stockage objet.
+
+    Les routes marquées *(étape 3)* sont spécifiées mais pas encore implémentées.
+servers:
+  - url: http://localhost:8080
+    description: Développement local (docker compose)
+tags:
+  - name: auth
+  - name: profil
+  - name: catalogue
+  - name: enregistrements
+  - name: abonnements
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Inscription
+      description: Crée un compte et ouvre directement une session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Compte créé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '409':
+          description: Email déjà utilisé (`EMAIL_ALREADY_USED`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Connexion
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Session ouverte
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: Identifiants incorrects (`INVALID_CREDENTIALS`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Renouvelle les tokens
+      description: |
+        Échange un refresh token contre une nouvelle paire de tokens. Le refresh token présenté
+        est invalidé (rotation). Présenter un refresh token déjà utilisé révoque toutes les
+        sessions de l'utilisateur (détection de vol).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Nouvelle paire de tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401':
+          description: Refresh token invalide (`INVALID_REFRESH_TOKEN`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Déconnexion
+      description: |
+        Révoque le refresh token fourni. Idempotent : un token inconnu ou déjà révoqué
+        renvoie aussi 204. L'access token reste valable jusqu'à son expiration (quelques minutes) ;
+        l'application doit le supprimer de son stockage.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '204':
+          description: Session fermée
+        '400': { $ref: '#/components/responses/ValidationError' }
+
+  /api/v1/me:
+    get:
+      tags: [profil]
+      summary: Profil et statut d'abonnement
+      responses:
+        '200':
+          description: Profil de l'utilisateur connecté
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/songs:
+    get:
+      tags: [catalogue]
+      summary: Catalogue et recherche paginée
+      description: Recherche insensible à la casse dans le titre et l'artiste. Tri par artiste puis titre.
+      parameters:
+        - name: query
+          in: query
+          required: false
+          description: Texte recherché (titre ou artiste). Vide ou absent = tout le catalogue.
+          schema: { type: string, maxLength: 100 }
+        - name: page
+          in: query
+          required: false
+          description: Numéro de page, à partir de 0.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: Page de chansons
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SongPage' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/songs/{id}:
+    get:
+      tags: [catalogue]
+      summary: Détail d'une chanson, avec les paroles LRC
+      parameters:
+        - $ref: '#/components/parameters/SongId'
+      responses:
+        '200':
+          description: Chanson
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SongDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/songs/{id}/instrumental-url:
+    get:
+      tags: [catalogue]
+      summary: URL signée de l'instrumental
+      description: |
+        Vérifie les droits avant de signer l'URL :
+        - abonné actif : accès illimité à tout le catalogue ;
+        - sinon : uniquement les chansons gratuites (`isFree`), dans la limite quotidienne
+          (`freeQuota.dailyLimit` de `/me`). Chaque appel réussi consomme une lecture ;
+          l'application doit donc réutiliser l'URL tant qu'elle est valable.
+      parameters:
+        - $ref: '#/components/parameters/SongId'
+      responses:
+        '200':
+          description: URL de téléchargement
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SignedUrl' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Chanson réservée aux abonnés (`SUBSCRIPTION_REQUIRED`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: Limite gratuite du jour atteinte (`FREE_LIMIT_REACHED`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /api/v1/recordings/upload-url:
+    post:
+      tags: [enregistrements]
+      summary: URLs signées pour envoyer un enregistrement (étape 3)
+      description: |
+        Renvoie deux URLs `PUT` : une pour la piste voix, une pour le mix final.
+        Le client envoie les fichiers directement au stockage avec l'en-tête `Content-Type`
+        indiqué, puis appelle `POST /recordings` avec les clés reçues.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecordingUploadUrlRequest' }
+      responses:
+        '200':
+          description: URLs d'envoi
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecordingUploadUrls' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/recordings:
+    post:
+      tags: [enregistrements]
+      summary: Enregistre les métadonnées d'un enregistrement (étape 3)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRecordingRequest' }
+      responses:
+        '201':
+          description: Enregistrement créé
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recording' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    get:
+      tags: [enregistrements]
+      summary: Mes enregistrements, du plus récent au plus ancien (étape 3)
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: Page d'enregistrements
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecordingPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/recordings/{id}:
+    delete:
+      tags: [enregistrements]
+      summary: Supprime un enregistrement et ses fichiers (étape 3)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Supprimé
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/subscriptions/verify:
+    post:
+      tags: [abonnements]
+      summary: Vérifie un achat Apple/Google et active l'abonnement (étape 3)
+      description: |
+        Le backend vérifie la preuve d'achat auprès d'Apple (App Store Server API) ou de Google
+        (Play Developer API), met à jour l'abonnement et renvoie le statut résultant. Sert aussi
+        à la restauration des achats.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VerifySubscriptionRequest' }
+      responses:
+        '200':
+          description: Statut d'abonnement après vérification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubscriptionStatus' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    SongId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    ValidationError:
+      description: Requête invalide (`VALIDATION_ERROR` ou `MALFORMED_REQUEST`)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Non authentifié (`UNAUTHORIZED`)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Ressource introuvable (`NOT_FOUND`)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      required: [status, code, title]
+      properties:
+        type: { type: string, example: about:blank }
+        title: { type: string, example: Bad Request }
+        status: { type: integer, example: 400 }
+        detail: { type: string, example: La requête contient des champs invalides. }
+        instance: { type: string, example: /api/v1/auth/register }
+        code: { type: string, example: VALIDATION_ERROR }
+        errors:
+          type: array
+          description: Présent pour `VALIDATION_ERROR`.
+          items:
+            type: object
+            properties:
+              field: { type: string, example: email }
+              message: { type: string, example: doit être une adresse électronique syntaxiquement correcte }
+
+    RegisterRequest:
+      type: object
+      required: [email, password, displayName]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 8, maxLength: 72, format: password }
+        displayName: { type: string, minLength: 1, maxLength: 50 }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+
+    TokenResponse:
+      type: object
+      required: [accessToken, refreshToken, tokenType, expiresIn]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        tokenType: { type: string, example: Bearer }
+        expiresIn:
+          type: integer
+          description: Durée de validité de l'access token, en secondes.
+          example: 900
+
+    Me:
+      type: object
+      required: [id, email, displayName, createdAt, subscription, freeQuota]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        createdAt: { type: string, format: date-time }
+        subscription: { $ref: '#/components/schemas/SubscriptionStatus' }
+        freeQuota: { $ref: '#/components/schemas/FreeQuota' }
+
+    SubscriptionStatus:
+      type: object
+      required: [active]
+      properties:
+        active: { type: boolean }
+        platform: { type: string, enum: [APPLE, GOOGLE], nullable: true }
+        productId: { type: string, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+
+    FreeQuota:
+      type: object
+      required: [dailyLimit, usedToday]
+      properties:
+        dailyLimit: { type: integer, example: 3 }
+        usedToday: { type: integer, example: 1 }
+
+    SongSummary:
+      type: object
+      required: [id, title, artist, durationMs, language, isFree]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        artist: { type: string }
+        durationMs: { type: integer, format: int64 }
+        language: { type: string, description: Code ISO 639-1, example: fr }
+        coverUrl: { type: string, format: uri, nullable: true }
+        isFree: { type: boolean }
+
+    SongDetail:
+      allOf:
+        - $ref: '#/components/schemas/SongSummary'
+        - type: object
+          required: [lyricsLrc]
+          properties:
+            lyricsLrc:
+              type: string
+              description: Paroles au format LRC (`[mm:ss.xx] texte`).
+
+    SongPage:
+      type: object
+      required: [items, page, size, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SongSummary' }
+        page: { type: integer }
+        size: { type: integer }
+        totalItems: { type: integer, format: int64 }
+        totalPages: { type: integer }
+
+    SignedUrl:
+      type: object
+      required: [url, expiresAt]
+      properties:
+        url: { type: string, format: uri }
+        expiresAt: { type: string, format: date-time }
+
+    RecordingUploadUrlRequest:
+      type: object
+      required: [songId]
+      properties:
+        songId: { type: string, format: uuid }
+
+    UploadTarget:
+      type: object
+      required: [key, url, contentType]
+      properties:
+        key: { type: string, description: Clé de stockage à renvoyer dans `POST /recordings`. }
+        url: { type: string, format: uri, description: URL `PUT` signée. }
+        contentType: { type: string, example: audio/mp4 }
+
+    RecordingUploadUrls:
+      type: object
+      required: [voice, mixed, expiresAt]
+      properties:
+        voice: { $ref: '#/components/schemas/UploadTarget' }
+        mixed: { $ref: '#/components/schemas/UploadTarget' }
+        expiresAt: { type: string, format: date-time }
+
+    CreateRecordingRequest:
+      type: object
+      required: [songId, voiceKey, mixedKey, durationMs]
+      properties:
+        songId: { type: string, format: uuid }
+        voiceKey: { type: string }
+        mixedKey: { type: string }
+        durationMs: { type: integer, format: int64, minimum: 1 }
+
+    Recording:
+      type: object
+      required: [id, songId, songTitle, songArtist, durationMs, createdAt, mixedUrl, mixedUrlExpiresAt]
+      properties:
+        id: { type: string, format: uuid }
+        songId: { type: string, format: uuid }
+        songTitle: { type: string }
+        songArtist: { type: string }
+        durationMs: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+        mixedUrl: { type: string, format: uri, description: URL `GET` signée du mix. }
+        mixedUrlExpiresAt: { type: string, format: date-time }
+
+    RecordingPage:
+      type: object
+      required: [items, page, size, totalItems, totalPages]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Recording' }
+        page: { type: integer }
+        size: { type: integer }
+        totalItems: { type: integer, format: int64 }
+        totalPages: { type: integer }
+
+    VerifySubscriptionRequest:
+      type: object
+      required: [platform, productId, purchaseToken]
+      properties:
+        platform: { type: string, enum: [APPLE, GOOGLE] }
+        productId: { type: string }
+        purchaseToken:
+          type: string
+          description: |
+            Apple : transaction signée (JWS) fournie par StoreKit 2.
+            Google : `purchaseToken` fourni par Google Play Billing.
